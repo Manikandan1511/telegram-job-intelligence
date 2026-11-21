@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 import asyncio
 import csv
 import io
+import logging
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 import httpx
@@ -22,8 +23,12 @@ from .services.intelligence import SKILLS, is_job, extract, score_job, likely_du
 from .services.resume_parser import parse_resume
 from .security import hash_password, verify_password, create_token, read_token
 
+logger = logging.getLogger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global MONITOR_WAKE_EVENT
+    MONITOR_WAKE_EVENT=asyncio.Event()
     upgrade_database()
     tasks=[asyncio.create_task(background_monitor()),asyncio.create_task(bot_poll())]
     yield
@@ -34,6 +39,7 @@ async def lifespan(app: FastAPI):
     if telegram_client and telegram_client.is_connected():
         async with TELEGRAM_LOCK:
             await telegram_client.disconnect()
+    MONITOR_WAKE_EVENT=None
 def require_auth(request:Request):
     public_paths={"/","/favicon.ico","/api/health","/api/auth/status","/api/auth/register","/api/auth/login","/docs","/openapi.json","/redoc"}
     if request.url.path in public_paths: return None
@@ -89,6 +95,17 @@ def client():
     return TelegramClient(settings.telegram_session, settings.telegram_api_id, settings.telegram_api_hash)
 
 TELEGRAM_LOCK = asyncio.Lock()
+MONITOR_WAKE_EVENT: asyncio.Event | None = None
+MONITOR_STATUS = {
+    "state": "starting",
+    "last_sync_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "enabled_sources": 0,
+    "messages_scanned": 0,
+    "authorized": False,
+    "account": None,
+}
 
 @asynccontextmanager
 async def telegram_connection():
@@ -185,49 +202,119 @@ async def maybe_daily_digest(session):
     pref.last_digest_date=digest_date
     session.commit()
 
+async def sync_source_history(tg, session: Session, src: Source, *, batch_size: int = 100, max_messages: int | None = None) -> int:
+    """Catch up from the durable checkpoint in bounded batches until current."""
+    entity=await tg.get_entity(int(src.chat_id))
+    scanned=0
+    while max_messages is None or scanned<max_messages:
+        limit=batch_size if max_messages is None else min(batch_size,max_messages-scanned)
+        batch=[]
+        async for message in tg.iter_messages(entity,limit=limit,min_id=src.last_message_id,reverse=True):
+            batch.append(message)
+        if not batch: break
+        for message in batch:
+            if message.message:
+                posted=message.date or datetime.now(timezone.utc)
+                await process_text(session,message.message,src.chat_id,message.id,posted,src.title)
+                # A previous attempt may have saved the job before its checkpoint.
+                job=session.scalar(select(Job).where(Job.source_chat_id==src.chat_id,Job.source_message_id==message.id))
+                pref=session.get(NotificationPreference,1)
+                threshold=pref.immediate_threshold if pref else settings.match_threshold
+                notify_enabled=pref.enabled if pref else True
+                chat_id=settings.bot_chat_id or (pref.chat_id if pref else None)
+                if job and not job.notified and job.score>=threshold and notify_enabled and settings.bot_token and chat_id:
+                    body=f"NEW JOB · {job.score}% match\n{job.title}\n{job.company or 'Company not listed'} · {job.location or 'Location not listed'}\nSource: {job.source_title}"
+                    if job.application_url: body+=f"\n{job.application_url}"
+                    try:
+                        async with httpx.AsyncClient(timeout=15) as hc:
+                            response=await hc.post(f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",json={"chat_id":chat_id,"text":body,"disable_web_page_preview":True})
+                            response.raise_for_status()
+                        job.notified=True
+                        session.add(Notification(job_id=job.id,channel="telegram",status="sent",sent_at=datetime.now(timezone.utc)))
+                    except Exception as error:
+                        logger.warning("Telegram alert delivery failed for job %s (%s)",job.id,type(error).__name__)
+                        session.add(Notification(job_id=job.id,channel="telegram",status="failed",error_message=type(error).__name__))
+            src.last_message_id=max(src.last_message_id,message.id)
+        session.commit()
+        scanned+=len(batch)
+        await asyncio.sleep(0)
+        if len(batch)<limit: break
+    return scanned
+
+
+async def wait_for_monitor(seconds: int):
+    if MONITOR_WAKE_EVENT is None:
+        await asyncio.sleep(seconds)
+        return
+    try:
+        await asyncio.wait_for(MONITOR_WAKE_EVENT.wait(),timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+    MONITOR_WAKE_EVENT.clear()
+
+
+def wake_monitor():
+    if MONITOR_WAKE_EVENT is not None:
+        MONITOR_WAKE_EVENT.set()
+
+
 async def background_monitor():
-    await asyncio.sleep(8)
+    await asyncio.sleep(5)
+    retry_delay=10
     while True:
         session=None
         try:
+            MONITOR_STATUS["state"]="syncing"
+            MONITOR_STATUS["last_sync_at"]=datetime.now(timezone.utc).isoformat()
+            MONITOR_STATUS["last_error"]=None
+            scanned=0
             session=SessionLocal()
-            if settings.telegram_api_id and settings.telegram_api_hash:
-                async with telegram_connection() as tg:
-                    if await tg.is_user_authorized():
-                        for src in session.scalars(select(Source).where(Source.enabled==True)).all():
-                            try:
-                                entity=await tg.get_entity(int(src.chat_id))
-                                async for m in tg.iter_messages(entity,limit=75,min_id=src.last_message_id,reverse=True):
-                                    if not m.message: continue
-                                    posted=m.date or datetime.now(timezone.utc)
-                                    made=await process_text(session,m.message,src.chat_id,m.id,posted,src.title)
-                                    if made:
-                                        job=session.scalar(select(Job).where(Job.source_chat_id==src.chat_id,Job.source_message_id==m.id))
-                                        pref=session.get(NotificationPreference,1)
-                                        threshold=pref.immediate_threshold if pref else settings.match_threshold
-                                        notify_enabled=pref.enabled if pref else True
-                                        chat_id=settings.bot_chat_id or (pref.chat_id if pref else None)
-                                        if job and not job.notified and job.score>=threshold and notify_enabled and settings.bot_token and chat_id:
-                                            body=f"NEW JOB · {job.score}% match\n{job.title}\n{job.company or 'Company not listed'} · {job.location or 'Location not listed'}\nSource: {job.source_title}"
-                                            if job.application_url: body+=f"\n{job.application_url}"
-                                            async with httpx.AsyncClient(timeout=15) as hc:
-                                                response=await hc.post(f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",json={"chat_id":chat_id,"text":body,"disable_web_page_preview":True})
-                                                response.raise_for_status()
-                                            job.notified=True
-                                            session.add(Notification(job_id=job.id,channel="telegram",status="sent",sent_at=datetime.now(timezone.utc)))
-                                    src.last_message_id=max(src.last_message_id,m.id)
-                                session.commit()
-                            except Exception:
-                                session.rollback()
-            await maybe_daily_digest(session)
-        except asyncio.CancelledError: raise
-        except Exception: pass
+            if not (settings.telegram_api_id and settings.telegram_api_hash):
+                MONITOR_STATUS["state"]="telegram_not_configured"
+                await wait_for_monitor(300)
+                continue
+            async with telegram_connection() as tg:
+                if not await tg.is_user_authorized():
+                    MONITOR_STATUS["authorized"]=False
+                    MONITOR_STATUS["state"]="telegram_login_required"
+                else:
+                    MONITOR_STATUS["authorized"]=True
+                    me=await tg.get_me()
+                    MONITOR_STATUS["account"]=getattr(me,"username",None) or getattr(me,"phone",None)
+                    sources=session.scalars(select(Source).where(Source.enabled==True)).all()
+                    MONITOR_STATUS["enabled_sources"]=len(sources)
+                    for src in sources:
+                        try:
+                            scanned+=await sync_source_history(tg,session,src)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as error:
+                            session.rollback()
+                            logger.exception("Telegram catch-up failed for source %s",src.chat_id)
+                            MONITOR_STATUS["last_error"]=type(error).__name__
+                    await maybe_daily_digest(session)
+                    if MONITOR_STATUS["last_error"] is None:
+                        MONITOR_STATUS["state"]="connected"
+                        MONITOR_STATUS["last_success_at"]=datetime.now(timezone.utc).isoformat()
+                        retry_delay=10
+                    else:
+                        MONITOR_STATUS["state"]="retrying"
+                        retry_delay=min(300,retry_delay*2)
+            MONITOR_STATUS["messages_scanned"]=scanned
+            await wait_for_monitor(300 if MONITOR_STATUS["last_error"] is None else retry_delay)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.exception("Telegram monitor cycle failed")
+            MONITOR_STATUS["state"]="retrying"
+            MONITOR_STATUS["last_error"]=type(error).__name__
+            await wait_for_monitor(retry_delay)
+            retry_delay=min(300,retry_delay*2)
         finally:
             if session: session.close()
-        await asyncio.sleep(300)
 
 @app.get("/api/health")
-def health(): return {"status":"ok","database":"sqlite" if settings.database_url.startswith("sqlite") else "configured","telegram_configured":bool(settings.telegram_api_id and settings.telegram_api_hash),"ai_configured":bool(settings.ai_base_url and settings.ai_model),"bot_configured":bool(settings.bot_token and settings.bot_chat_id)}
+def health(): return {"status":"ok","database":"sqlite" if settings.database_url.startswith("sqlite") else "configured","telegram_configured":bool(settings.telegram_api_id and settings.telegram_api_hash),"monitor":dict(MONITOR_STATUS),"ai_configured":bool(settings.ai_base_url and settings.ai_model),"bot_configured":bool(settings.bot_token and settings.bot_chat_id)}
 @app.get("/api/auth/status")
 def auth_status(s:Session=Depends(db)):
     return {"account_configured":bool(s.scalar(select(func.count()).select_from(User)) or 0)}
@@ -329,15 +416,26 @@ def delete_resume(resume_id:int,s:Session=Depends(db)):
 @app.get("/api/telegram/status")
 async def telegram_status():
     if not settings.telegram_api_id: return {"configured":False,"connected":False}
+    if MONITOR_STATUS.get("authorized") and MONITOR_STATUS.get("state") in {"syncing","connected","retrying"}:
+        return {"configured":True,"connected":True,"account":MONITOR_STATUS.get("account"),"monitor":dict(MONITOR_STATUS)}
     try:
         async with telegram_connection() as c:
             connected=await c.is_user_authorized(); me=await c.get_me() if connected else None
-            return {"configured":True,"connected":connected,"account":getattr(me,"username",None) or getattr(me,"phone",None)}
-    except Exception as e: return {"configured":True,"connected":False,"error":str(e)}
+            MONITOR_STATUS["authorized"]=connected
+            MONITOR_STATUS["account"]=getattr(me,"username",None) or getattr(me,"phone",None)
+            return {"configured":True,"connected":connected,"account":getattr(me,"username",None) or getattr(me,"phone",None),"monitor":dict(MONITOR_STATUS)}
+    except Exception as e: return {"configured":True,"connected":False,"error":type(e).__name__,"monitor":dict(MONITOR_STATUS)}
+@app.post("/api/telegram/wake")
+def wake_telegram_monitor():
+    wake_monitor()
+    return {"ok":True,"message":"Telegram catch-up requested."}
 @app.post("/api/telegram/disconnect")
 async def telegram_disconnect():
     async with telegram_connection() as c:
         if await c.is_user_authorized(): await c.log_out()
+    MONITOR_STATUS["authorized"]=False
+    MONITOR_STATUS["state"]="telegram_login_required"
+    wake_monitor()
     return {"ok":True,"connected":False}
 @app.post("/api/telegram/start")
 async def telegram_start(data:dict):
@@ -347,6 +445,9 @@ async def telegram_start(data:dict):
         async with telegram_connection() as c:
             if await c.is_user_authorized():
                 me=await c.get_me()
+                MONITOR_STATUS["authorized"]=True
+                MONITOR_STATUS["account"]=getattr(me,"username",None) or getattr(me,"phone",None)
+                wake_monitor()
                 return {"ok":True,"already_connected":True,"account":getattr(me,"username",None) or getattr(me,"phone",None)}
             try:
                 sent=await c.send_code_request(phone)
@@ -369,6 +470,10 @@ async def telegram_verify(data:dict):
     try:
         async with telegram_connection() as c:
             await c.sign_in(phone=data["phone"],code=data["code"],phone_code_hash=data["phone_code_hash"])
+            me=await c.get_me()
+        MONITOR_STATUS["authorized"]=True
+        MONITOR_STATUS["account"]=getattr(me,"username",None) or getattr(me,"phone",None)
+        wake_monitor()
         return {"ok":True,"connected":True}
     except SessionPasswordNeededError: raise HTTPException(428,"Two-step verification required. Submit your password to /api/telegram/password.")
     except HTTPException: raise
@@ -378,6 +483,10 @@ async def telegram_password(data:dict):
     try:
         async with telegram_connection() as c:
             await c.sign_in(password=data["password"])
+            me=await c.get_me()
+        MONITOR_STATUS["authorized"]=True
+        MONITOR_STATUS["account"]=getattr(me,"username",None) or getattr(me,"phone",None)
+        wake_monitor()
         return {"ok":True,"connected":True}
     except Exception as e: raise HTTPException(400,str(e))
 @app.get("/api/telegram/sources")
@@ -397,7 +506,7 @@ async def telegram_sources(s:Session=Depends(db)):
 def toggle_source(chat_id:str,data:dict,s:Session=Depends(db)):
     src=s.scalar(select(Source).where(Source.chat_id==chat_id))
     if not src: raise HTTPException(404,"Refresh source list first")
-    src.enabled=bool(data.get("enabled")); s.commit(); return {"ok":True}
+    src.enabled=bool(data.get("enabled")); s.commit(); wake_monitor(); return {"ok":True}
 async def process_text(s, text, chat_id, message_id, posted, source_title):
     if not is_job(text): return False
     if s.scalar(select(Message).where(Message.chat_id==chat_id,Message.message_id==message_id)): return False
@@ -431,14 +540,12 @@ async def sync(s:Session=Depends(db),limit:int=Query(100,ge=1,le=500)):
     async with telegram_connection() as c:
         if not await c.is_user_authorized(): raise HTTPException(401,"Connect Telegram first")
         for src in s.scalars(select(Source).where(Source.enabled==True)).all():
-            entity=await c.get_entity(int(src.chat_id))
-            async for m in c.iter_messages(entity,limit=limit,min_id=src.last_message_id,reverse=True):
-                if not m.message: continue
-                posted=m.date or datetime.now(timezone.utc)
-                if await process_text(s,m.message,src.chat_id,m.id,posted,src.title): added+=1
-                src.last_message_id=max(src.last_message_id,m.id)
-            s.commit()
-    return {"ok":True,"new_jobs":added}
+            start=s.scalar(select(func.count()).select_from(Job).where(Job.source_chat_id==src.chat_id)) or 0
+            await sync_source_history(c,s,src,max_messages=limit)
+            end=s.scalar(select(func.count()).select_from(Job).where(Job.source_chat_id==src.chat_id)) or 0
+            added+=max(0,end-start)
+    wake_monitor()
+    return {"ok":True,"new_jobs":added,"message":"Sync completed. New postings will continue to appear automatically."}
 @app.get("/api/jobs")
 def list_jobs(search:str="",category:str="",sort:str="newest",s:Session=Depends(db)):
     q=select(Job)

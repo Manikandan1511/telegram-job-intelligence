@@ -42,6 +42,8 @@ docker compose up --build
 
 Open http://127.0.0.1:8080. Set a private `POSTGRES_PASSWORD` in the local ignored `.env` before using this beyond a throwaway local run. PostgreSQL data uses a named volume; Telegram and resume files remain in this project folder.
 
+For restart recovery, configure Docker Desktop to start when you sign in and launch the stack once with `docker compose up -d --build`. The saved Telegram session reconnects automatically. After sleep or shutdown, the monitor catches up from its last saved message IDs; the dashboard asks for an immediate catch-up when it opens/returns to the foreground and refreshes displayed jobs every 30 seconds. Collection pauses while the Mac is asleep or powered off.
+
 ## Telegram connection
 
 In **Telegram Sources**, request a login code using your phone number in international format, then submit the code. The service keeps one Telethon connection active to avoid session file contention. If the account is already connected, the page reports that instead of requesting another code. Telegram may also require a two-step verification password; the UI submits it only to the local backend and does not store it. Load the available chats and enable the job groups or channels you want. Use **Sync now** to scan recent history. Telegram account access remains local to this machine.

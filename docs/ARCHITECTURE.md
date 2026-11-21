@@ -13,7 +13,7 @@ flowchart LR
   API --> BOT[Optional private Telegram bot]
 ```
 
-The backend is a single process. It shares one Telethon client behind an async lock so its SQLite session is not opened by multiple clients at once. A background task syncs enabled chats every five minutes. SQLite stores profiles, resume versions, source checkpoints, messages, jobs, and applications by default; PostgreSQL can be configured for deployments. Original resumes live under `storage/resumes/`, which is private and Git-ignored. The database, resume folder, and Telethon session must use durable storage and be backed up together.
+The backend is a single process. It shares one Telethon client behind an async lock so its SQLite session is not opened by multiple clients at once. A background task syncs enabled chats every five minutes, and drains history in batches from each source's saved message ID until it reaches the newest post. Opening or returning to the dashboard wakes the monitor immediately. SQLite stores profiles, resume versions, source checkpoints, messages, jobs, and applications by default; PostgreSQL can be configured for deployments. Original resumes live under `storage/resumes/`, which is private and Git-ignored. The database, resume folder, and Telegram session must use durable storage and be backed up together.
 
 Inference only receives Telegram job text. Resume text is parsed locally and is not sent to the model. If the configured model is unavailable, deterministic extraction and matching remain active.
 

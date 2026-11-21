@@ -116,6 +116,28 @@ def test_single_user_profile_survives_database_reopen(tmp_path):
         assert result["locations"]==["Chennai"]
 
 
+def test_telegram_catchup_drains_multiple_batches_from_checkpoint(monkeypatch):
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    async def skip_analysis(*_args):
+        return False
+    monkeypatch.setattr(main,"process_text",skip_analysis)
+    messages=[type("TelegramMessage",(),{"id":i,"message":f"post {i}","date":datetime.now(timezone.utc)})() for i in range(1,238)]
+    class FakeTelegram:
+        async def get_entity(self,_chat_id):
+            return object()
+        async def iter_messages(self,_entity,*,limit,min_id,reverse):
+            for message in [item for item in messages if item.id>min_id][:limit]:
+                yield message
+    with Session(engine) as session:
+        source=main.Source(chat_id="123",title="jobs",last_message_id=0)
+        session.add(source); session.commit()
+        scanned=asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))
+        assert scanned==237
+        assert source.last_message_id==237
+        assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))==0
+
+
 def test_password_hash_and_signed_token_round_trip():
     encoded=hash_password("local-safe-passphrase-2026")
     assert verify_password("local-safe-passphrase-2026",encoded)
