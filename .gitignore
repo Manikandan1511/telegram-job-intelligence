@@ -1,0 +1,13 @@
+.env
+*.session
+*.session-journal
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.venv/
+venv/
+node_modules/
+dist/
+backend/data/
+storage/resumes/*
+!storage/resumes/.gitkeep

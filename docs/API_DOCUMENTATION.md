@@ -1,0 +1,35 @@
+# API quick reference
+
+The local API root is `http://127.0.0.1:8000`; interactive OpenAPI documentation is at `/docs`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Service and provider readiness (public) |
+| GET | `/api/auth/status` | First-run account setup status (public) |
+| POST | `/api/auth/register` | Create the first local account (public) |
+| POST | `/api/auth/login` | Sign in (public) |
+| GET / POST | `/api/auth/me` / `/api/auth/logout` | Read local identity / sign out |
+| GET / PUT | `/api/profile` | View or edit the candidate profile |
+| POST / GET | `/api/resume` | Upload a resume / list versions |
+| PUT / DELETE | `/api/resume/{id}/activate` or `/api/resume/{id}` | Activate or delete a version |
+| GET | `/api/telegram/status` | Check local account authorization |
+| POST | `/api/telegram/start` | Request a login code |
+| POST | `/api/telegram/verify` | Verify the login code |
+| POST | `/api/telegram/password` | Complete two-step verification |
+| GET | `/api/telegram/sources` | List available groups and channels |
+| PUT | `/api/telegram/sources/{chat_id}` | Enable or disable a source |
+| POST | `/api/telegram/sync` | Run a bounded manual sync |
+| GET | `/api/jobs/recommended` | List stronger matches |
+| GET | `/api/jobs/recent` | List recent jobs |
+| GET | `/api/jobs/categories` | Category counts |
+| GET / PUT | `/api/preferences` | Read or update role/location preferences |
+| GET / PUT | `/api/notifications/settings` | Read or update alert and digest preferences |
+| POST | `/api/notifications/test` | Send an explicit test alert |
+| GET | `/api/jobs` | Search, filter, and sort jobs |
+| GET | `/api/jobs/export` | Download a CSV export |
+| GET | `/api/applications` | List tracked applications |
+| PUT | `/api/jobs/{id}/application` | Update application status |
+| POST | `/api/matches/recalculate` | Recalculate current matches |
+| GET | `/api/dashboard` | Dashboard totals |
+
+Private endpoints require `Authorization: Bearer <token>`. The first account is the only account in this edition. All endpoints are intended for loopback use. Do not expose this server to a public network.

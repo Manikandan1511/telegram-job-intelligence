@@ -1,0 +1,20 @@
+# Architecture
+
+```mermaid
+flowchart LR
+  TG[Telegram chats] --> TC[Telethon shared client]
+  TC --> SY[Incremental source sync]
+  SY --> DB[(SQLite)]
+  SY --> EX[Rule extraction + optional Agentia-Max]
+  EX --> MA[Profile matching + duplicate check]
+  MA --> DB
+  DB --> API[FastAPI on loopback]
+  API --> UI[React dashboard]
+  API --> BOT[Optional private Telegram bot]
+```
+
+The backend is a single process. It shares one Telethon client behind an async lock so its SQLite session is not opened by multiple clients at once. A background task syncs enabled chats every five minutes. SQLite stores profiles, resume versions, source checkpoints, messages, jobs, and applications by default; PostgreSQL can be configured for deployments. Original resumes live under `storage/resumes/`, which is private and Git-ignored. The database, resume folder, and Telethon session must use durable storage and be backed up together.
+
+Inference only receives Telegram job text. Resume text is parsed locally and is not sent to the model. If the configured model is unavailable, deterministic extraction and matching remain active.
+
+Vercel may serve the static dashboard, but its request-scoped functions and temporary filesystem cannot host the long-running Telegram monitor or durable Telethon session. A Vercel deployment therefore needs an external persistent API/worker and database; see `docs/DEPLOYMENT.md`.
