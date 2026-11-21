@@ -18,7 +18,7 @@ A `401` from `/api/telegram/sync` means the account is not authorized; connect i
 
 ## Catch up after Mac sleep or shutdown
 
-The Telegram login session and each source's last-seen message ID are saved on disk. On backend startup, the monitor reconnects with that session and reads forward from the saved IDs in batches until it reaches the newest messages. A dashboard open requests an immediate catch-up, and open dashboard data refreshes every 30 seconds. Brief Telegram/network failures are logged and retried with increasing waits up to five minutes.
+The Telegram login session and each source's last-seen message ID are saved on disk. A new source begins at the 30-day boundary. Existing source checkpoints continue forward from their saved message IDs. On backend startup, stored job and message records older than 30 days are removed; source selections and checkpoints remain. A dashboard open requests an immediate catch-up, and open dashboard data refreshes every 30 seconds. Brief Telegram/network failures are logged and retried with increasing waits up to five minutes.
 
 For automatic recovery after a Mac reboot, open Docker Desktop **Settings → General** and enable **Start Docker Desktop when you sign in**, then start this stack once from the project folder with `docker compose up -d --build`. The Compose restart policies bring the API, database, and dashboard back when Docker starts. The Mac must be awake and connected to the internet; while it is off or asleep, no local worker can collect messages. After it wakes, the worker catches up from each saved checkpoint. Use `docker compose logs -f backend` to inspect reconnect or source errors.
 

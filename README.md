@@ -42,7 +42,7 @@ docker compose up --build
 
 Open http://127.0.0.1:8080. Your saved database remains in `backend/data/`; the Telegram session and private resumes remain under `storage/`.
 
-For restart recovery, configure Docker Desktop to start when you sign in and launch the stack once with `docker compose up -d --build`. The saved Telegram session reconnects automatically. After sleep or shutdown, the monitor catches up from its last saved message IDs; the dashboard asks for an immediate catch-up when it opens/returns to the foreground and refreshes displayed jobs every 30 seconds. Collection pauses while the Mac is asleep or powered off.
+For restart recovery, configure Docker Desktop to start when you sign in and launch the stack once with `docker compose up -d --build`. The saved Telegram session reconnects automatically. New sources initially import only the last 30 days, and older stored job/message records are pruned at startup. After sleep or shutdown, the monitor catches up from its last saved message IDs; the dashboard asks for an immediate catch-up when it opens/returns to the foreground and refreshes displayed jobs every 30 seconds. Collection pauses while the Mac is asleep or powered off.
 
 ## Telegram connection
 

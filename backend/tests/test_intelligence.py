@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import Session
 
 from backend.app.models import Profile
@@ -127,7 +127,7 @@ def test_telegram_catchup_drains_multiple_batches_from_checkpoint(monkeypatch):
     class FakeTelegram:
         async def get_entity(self,_chat_id):
             return object()
-        async def iter_messages(self,_entity,*,limit,min_id,reverse):
+        async def iter_messages(self,_entity,*,limit,min_id,reverse,offset_date=None):
             for message in [item for item in messages if item.id>min_id][:limit]:
                 yield message
     with Session(engine) as session:
@@ -137,6 +137,52 @@ def test_telegram_catchup_drains_multiple_batches_from_checkpoint(monkeypatch):
         assert scanned==237
         assert source.last_message_id==237
         assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))==0
+
+
+def test_new_source_bootstrap_uses_one_month_cutoff(monkeypatch):
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now=datetime.now(timezone.utc)
+    messages=[type("TelegramMessage",(),{"id":i,"message":f"post {i}","date":now-timedelta(days=days)})() for i,days in [(1,29),(2,10)]]
+    async def skip_analysis(*_args): return False
+    monkeypatch.setattr(main,"process_text",skip_analysis)
+    class FakeTelegram:
+        async def get_entity(self,_chat_id): return object()
+        async def iter_messages(self,_entity,*,limit,min_id,reverse,offset_date=None):
+            assert reverse is True and min_id==0
+            assert now-timedelta(days=31)<offset_date<now-timedelta(days=29)
+            for message in messages:
+                if message.date>=offset_date:
+                    yield message
+        async def get_messages(self,_entity,limit):
+            return [type("TelegramMessage",(),{"id":50})()]
+    with Session(engine) as session:
+        source=main.Source(chat_id="123",title="jobs",last_message_id=0)
+        session.add(source); session.commit()
+        assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))==2
+        assert source.last_message_id==2
+
+
+def test_prune_expired_opportunities_keeps_sources_and_recent_crossposts():
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now=datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add(main.Source(chat_id="source",title="Source",enabled=True))
+        old=main.Job(title="Old opening",description="Old",source_chat_id="source",posted_at=now-timedelta(days=31))
+        recent=main.Job(title="Recent opening",description="Recent",source_chat_id="source",posted_at=now-timedelta(days=2))
+        crossposted=main.Job(title="Recent crosspost",description="Recent",source_chat_id="source",posted_at=now-timedelta(days=40))
+        session.add_all([old,recent,crossposted]); session.flush()
+        session.add_all([
+            main.JobSource(job_id=crossposted.id,chat_id="source",message_id=44,source_title="Source",original_message="Recent",posted_at=now-timedelta(days=1)),
+            main.JobSource(job_id=old.id,chat_id="source",message_id=45,source_title="Source",original_message="Old",posted_at=now-timedelta(days=31)),
+            main.Message(chat_id="source",message_id=45,text="Old",posted_at=now-timedelta(days=31)),
+        ])
+        session.commit()
+        assert main.prune_expired_opportunities(session,now=now)==1
+        assert {job.title for job in session.scalars(select(main.Job)).all()}=={"Recent opening","Recent crosspost"}
+        assert session.scalar(select(func.count()).select_from(main.Source))==1
+        assert session.scalar(select(func.count()).select_from(main.Message))==0
 
 
 def test_job_search_matches_skills_and_filters_latest_posts_first():

@@ -30,6 +30,10 @@ async def lifespan(app: FastAPI):
     global MONITOR_WAKE_EVENT
     MONITOR_WAKE_EVENT=asyncio.Event()
     upgrade_database()
+    with SessionLocal() as session:
+        removed=prune_expired_opportunities(session)
+        if removed:
+            logger.info("Removed %s opportunities older than 30 days",removed)
     tasks=[asyncio.create_task(background_monitor()),asyncio.create_task(bot_poll())]
     yield
     for task in tasks: task.cancel()
@@ -109,14 +113,17 @@ MONITOR_STATUS = {
 
 @asynccontextmanager
 async def telegram_connection():
-    """Share one connection and serialize access to Telethon's SQLite session."""
+    """Share one Telegram client and serialize client initialization."""
     global telegram_client
     async with TELEGRAM_LOCK:
         if telegram_client is None:
             telegram_client = client()
         if not telegram_client.is_connected():
             await telegram_client.connect()
-        yield telegram_client
+        connected_client=telegram_client
+    # Keep the lock out of long history processing so source-list and auth
+    # requests can use the same Telethon client while catch-up is underway.
+    yield connected_client
 def job_out(j):
     return {"id":j.id,"title":j.title,"company":j.company,"description":j.description,"location":j.location,"employment_type":j.employment_type,"experience_required":j.experience_required,"education_required":j.education_required,"graduation_year":j.graduation_year,"work_mode":j.work_mode,"salary":j.salary,"application_deadline":j.application_deadline,"application_url":j.application_url,"contact_email":j.contact_email,"contact_information":j.contact_information,"source_title":j.source_title,"posted_at":j.posted_at.isoformat(),"score":j.score,"matched_skills":json.loads(j.matched_skills),"missing_skills":json.loads(j.missing_skills),"required_skills":json.loads(j.required_skills),"extraction_confidence":j.extraction_confidence,"eligibility":j.eligibility,"review_reasons":json.loads(j.review_reasons),"application_status":j.application_status}
 
@@ -203,15 +210,22 @@ async def maybe_daily_digest(session):
     session.commit()
 
 async def sync_source_history(tg, session: Session, src: Source, *, batch_size: int = 100, max_messages: int | None = None) -> int:
-    """Catch up from the durable checkpoint in bounded batches until current."""
+    """Catch up from the checkpoint; a new source starts at the 30-day boundary."""
     entity=await tg.get_entity(int(src.chat_id))
     scanned=0
+    initial_history=src.last_message_id==0
+    cutoff=datetime.now(timezone.utc)-timedelta(days=30) if initial_history else None
     while max_messages is None or scanned<max_messages:
         limit=batch_size if max_messages is None else min(batch_size,max_messages-scanned)
         batch=[]
-        async for message in tg.iter_messages(entity,limit=limit,min_id=src.last_message_id,reverse=True):
+        async for message in tg.iter_messages(entity,limit=limit,min_id=src.last_message_id,reverse=True,offset_date=cutoff):
             batch.append(message)
-        if not batch: break
+        if not batch:
+            if initial_history and src.last_message_id==0:
+                latest=await tg.get_messages(entity,limit=1)
+                if latest: src.last_message_id=getattr(latest[0],"id",0) or 0
+                session.commit()
+            break
         for message in batch:
             if message.message:
                 posted=message.date or datetime.now(timezone.utc)
@@ -240,6 +254,25 @@ async def sync_source_history(tg, session: Session, src: Source, *, batch_size: 
         await asyncio.sleep(0)
         if len(batch)<limit: break
     return scanned
+
+
+def prune_expired_opportunities(session: Session, *, now: datetime | None = None) -> int:
+    """Keep only the last 30 days of job data while retaining source settings."""
+    cutoff=(now or datetime.now(timezone.utc))-timedelta(days=30)
+    candidates=session.scalars(select(Job).where(Job.posted_at<cutoff)).all()
+    expired=[]
+    for job in candidates:
+        recent_source=session.scalar(select(func.count()).select_from(JobSource).where(JobSource.job_id==job.id,JobSource.posted_at>=cutoff)) or 0
+        if not recent_source: expired.append(job.id)
+    if expired:
+        session.execute(JobSource.__table__.delete().where(JobSource.job_id.in_(expired)))
+        session.execute(Application.__table__.delete().where(Application.job_id.in_(expired)))
+        session.execute(Notification.__table__.delete().where(Notification.job_id.in_(expired)))
+        session.execute(Job.__table__.delete().where(Job.id.in_(expired)))
+    session.execute(JobSource.__table__.delete().where(JobSource.posted_at<cutoff))
+    session.execute(Message.__table__.delete().where(Message.posted_at<cutoff))
+    session.commit()
+    return len(expired)
 
 
 async def wait_for_monitor(seconds: int):
