@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import calendar
 import csv
 import io
 import logging
@@ -210,25 +211,50 @@ async def maybe_daily_digest(session):
     session.commit()
 
 async def sync_source_history(tg, session: Session, src: Source, *, batch_size: int = 100, max_messages: int | None = None) -> int:
-    """Catch up from the checkpoint; a new source starts at the 30-day boundary."""
+    """Catch up from the checkpoint; a new source starts at last month's date boundary."""
     entity=await tg.get_entity(int(src.chat_id))
     scanned=0
-    initial_history=src.last_message_id==0
-    cutoff=datetime.now(timezone.utc)-timedelta(days=30) if initial_history else None
+    cutoff=history_cutoff()
+    latest=await tg.get_messages(entity,limit=1)
+    if latest and (latest[0].date or datetime.now(timezone.utc))<cutoff:
+        # This source has no posts in the allowed window. Jump over its old
+        # history instead of paging from its first message.
+        src.last_message_id=max(src.last_message_id,getattr(latest[0],"id",0) or 0)
+        session.commit()
+        return 0
+    checkpoint_is_recent=False
+    if src.last_message_id:
+        checkpoint=await tg.get_messages(entity,ids=src.last_message_id)
+        checkpoint_message=checkpoint[0] if isinstance(checkpoint,(list,tuple)) else checkpoint
+        checkpoint_is_recent=bool(checkpoint_message and (checkpoint_message.date or datetime.min.replace(tzinfo=timezone.utc))>=cutoff)
+    if not checkpoint_is_recent:
+        # Find the message immediately before the cutoff in normal order, then
+        # advance by ID. Verify its date because Telegram peers can return an
+        # empty boundary when there are no posts in that period.
+        boundary=await tg.get_messages(entity,limit=1,offset_date=cutoff)
+        if boundary:
+            boundary_date=boundary[0].date or datetime.min.replace(tzinfo=timezone.utc)
+            boundary_id=getattr(boundary[0],"id",0) or 0
+            src.last_message_id=boundary_id if boundary_date<cutoff else max(0,boundary_id-1)
+        else:
+            src.last_message_id=0
+        session.commit()
     while max_messages is None or scanned<max_messages:
         limit=batch_size if max_messages is None else min(batch_size,max_messages-scanned)
         batch=[]
-        async for message in tg.iter_messages(entity,limit=limit,min_id=src.last_message_id,reverse=True,offset_date=cutoff):
+        async for message in tg.iter_messages(entity,limit=limit,min_id=src.last_message_id,reverse=True):
             batch.append(message)
         if not batch:
-            if initial_history and src.last_message_id==0:
-                latest=await tg.get_messages(entity,limit=1)
-                if latest: src.last_message_id=getattr(latest[0],"id",0) or 0
+            if src.last_message_id==0 and latest:
+                src.last_message_id=getattr(latest[0],"id",0) or 0
                 session.commit()
             break
         for message in batch:
+            posted=message.date or datetime.now(timezone.utc)
+            if posted<cutoff:
+                src.last_message_id=max(src.last_message_id,message.id)
+                continue
             if message.message:
-                posted=message.date or datetime.now(timezone.utc)
                 await process_text(session,message.message,src.chat_id,message.id,posted,src.title)
                 # A previous attempt may have saved the job before its checkpoint.
                 job=session.scalar(select(Job).where(Job.source_chat_id==src.chat_id,Job.source_message_id==message.id))
@@ -256,9 +282,21 @@ async def sync_source_history(tg, session: Session, src: Source, *, batch_size: 
     return scanned
 
 
+def history_cutoff(now: datetime | None = None) -> datetime:
+    """Return midnight in India on the same date of the previous month."""
+    local_now=(now or datetime.now(ZoneInfo("Asia/Kolkata"))).astimezone(ZoneInfo("Asia/Kolkata"))
+    year=local_now.year
+    month=local_now.month-1
+    if month==0:
+        year-=1
+        month=12
+    day=min(local_now.day,calendar.monthrange(year,month)[1])
+    return datetime(year,month,day,tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
+
+
 def prune_expired_opportunities(session: Session, *, now: datetime | None = None) -> int:
-    """Keep only the last 30 days of job data while retaining source settings."""
-    cutoff=(now or datetime.now(timezone.utc))-timedelta(days=30)
+    """Keep current and previous-month opportunities while retaining sources."""
+    cutoff=history_cutoff(now)
     candidates=session.scalars(select(Job).where(Job.posted_at<cutoff)).all()
     expired=[]
     for job in candidates:
@@ -301,6 +339,7 @@ async def background_monitor():
             MONITOR_STATUS["last_sync_at"]=datetime.now(timezone.utc).isoformat()
             MONITOR_STATUS["last_error"]=None
             scanned=0
+            backlog_remaining=False
             session=SessionLocal()
             if not (settings.telegram_api_id and settings.telegram_api_hash):
                 MONITOR_STATUS["state"]="telegram_not_configured"
@@ -318,7 +357,9 @@ async def background_monitor():
                     MONITOR_STATUS["enabled_sources"]=len(sources)
                     for src in sources:
                         try:
-                            scanned+=await sync_source_history(tg,session,src)
+                            source_scanned=await sync_source_history(tg,session,src,max_messages=10)
+                            scanned+=source_scanned
+                            backlog_remaining|=source_scanned==100
                         except asyncio.CancelledError:
                             raise
                         except Exception as error:
@@ -327,14 +368,14 @@ async def background_monitor():
                             MONITOR_STATUS["last_error"]=type(error).__name__
                     await maybe_daily_digest(session)
                     if MONITOR_STATUS["last_error"] is None:
-                        MONITOR_STATUS["state"]="connected"
+                        MONITOR_STATUS["state"]="syncing" if backlog_remaining else "connected"
                         MONITOR_STATUS["last_success_at"]=datetime.now(timezone.utc).isoformat()
                         retry_delay=10
                     else:
                         MONITOR_STATUS["state"]="retrying"
                         retry_delay=min(300,retry_delay*2)
             MONITOR_STATUS["messages_scanned"]=scanned
-            await wait_for_monitor(300 if MONITOR_STATUS["last_error"] is None else retry_delay)
+            await wait_for_monitor(1 if backlog_remaining else 300 if MONITOR_STATUS["last_error"] is None else retry_delay)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -572,20 +613,22 @@ async def process_text(s, text, chat_id, message_id, posted, source_title):
     s.add(JobSource(job_id=j.id,chat_id=chat_id,message_id=message_id,source_title=source_title,original_message=text,posted_at=posted))
     s.add(Message(chat_id=chat_id,message_id=message_id,text=text,posted_at=posted,processed=True)); s.commit(); return True
 @app.post("/api/telegram/sync")
-async def sync(s:Session=Depends(db),limit:int=Query(100,ge=1,le=500)):
-    added=0
+async def sync(s:Session=Depends(db),limit:int=Query(20,ge=1,le=500)):
+    added=0; scanned=0
     async with telegram_connection() as c:
         if not await c.is_user_authorized(): raise HTTPException(401,"Connect Telegram first")
         for src in s.scalars(select(Source).where(Source.enabled==True)).all():
+            remaining=limit-scanned
+            if remaining<=0: break
             start=s.scalar(select(func.count()).select_from(Job).where(Job.source_chat_id==src.chat_id)) or 0
-            await sync_source_history(c,s,src,max_messages=limit)
+            scanned+=await sync_source_history(c,s,src,max_messages=remaining)
             end=s.scalar(select(func.count()).select_from(Job).where(Job.source_chat_id==src.chat_id)) or 0
             added+=max(0,end-start)
     wake_monitor()
-    return {"ok":True,"new_jobs":added,"message":"Sync completed. New postings will continue to appear automatically."}
+    return {"ok":True,"new_jobs":added,"message":f"Sync batch processed (up to {limit} messages). Background sync will continue catching up automatically."}
 @app.get("/api/jobs")
 def list_jobs(search:str="",category:str="",sort:str="newest",period:str="",source:str="",s:Session=Depends(db)):
-    q=select(Job)
+    q=select(Job).where(Job.posted_at>=history_cutoff())
     enabled_sources=select(Source.chat_id).where(Source.enabled==True)
     if source:
         selected_source=s.scalar(select(Source).where(Source.chat_id==source))
@@ -604,11 +647,11 @@ def list_jobs(search:str="",category:str="",sort:str="newest",period:str="",sour
     elif category=="strong": q=q.where(Job.score.between(70,84))
     elif category=="moderate": q=q.where(Job.score.between(55,69))
     elif category=="internship": q=q.where(Job.employment_type.ilike("%intern%"))
-    day_ranges={"1d":1,"5d":5,"1w":7,"15d":15,"1m":30}
+    day_ranges={"1d":1,"5d":5,"1w":7,"15d":15}
     if period in day_ranges:
         q=q.where(Job.posted_at>=datetime.now(timezone.utc)-timedelta(days=day_ranges[period]))
-    elif period=="older":
-        q=q.where(Job.posted_at<datetime.now(timezone.utc)-timedelta(days=30))
+    elif period=="1m":
+        q=q.where(Job.posted_at>=history_cutoff())
     elif period not in ("","all"):
         raise HTTPException(422,"Choose a supported posting-age filter")
     if sort=="match": q=q.order_by(Job.score.desc(),Job.posted_at.desc(),Job.id.desc())
@@ -630,7 +673,7 @@ def export_jobs(source:str="",s:Session=Depends(db)):
     output=io.StringIO(newline="")
     writer=csv.writer(output)
     writer.writerow(["Title","Company","Location","Employment Type","Match Score","Eligibility","Application Status","Application URL","Source","Posted At","Description"])
-    q=select(Job)
+    q=select(Job).where(Job.posted_at>=history_cutoff())
     enabled_sources=select(Source.chat_id).where(Source.enabled==True)
     if source:
         selected_source=s.scalar(select(Source).where(Source.chat_id==source))

@@ -123,19 +123,24 @@ def test_telegram_catchup_drains_multiple_batches_from_checkpoint(monkeypatch):
     async def skip_analysis(*_args):
         return False
     monkeypatch.setattr(main,"process_text",skip_analysis)
-    messages=[type("TelegramMessage",(),{"id":i,"message":f"post {i}","date":datetime.now(timezone.utc)})() for i in range(1,238)]
+    messages=[type("TelegramMessage",(),{"id":i,"message":f"post {i}","date":datetime.now(timezone.utc)})() for i in range(2,239)]
     class FakeTelegram:
         async def get_entity(self,_chat_id):
             return object()
-        async def iter_messages(self,_entity,*,limit,min_id,reverse,offset_date=None):
+        async def get_messages(self,_entity,limit=None,offset_date=None,ids=None):
+            if ids is not None:
+                return type("TelegramMessage",(),{"id":ids,"date":datetime.now(timezone.utc)})()
+            return [messages[-1]]
+        async def iter_messages(self,_entity,*,limit,min_id,reverse):
+            assert reverse is True
             for message in [item for item in messages if item.id>min_id][:limit]:
                 yield message
     with Session(engine) as session:
-        source=main.Source(chat_id="123",title="jobs",last_message_id=0)
+        source=main.Source(chat_id="123",title="jobs",last_message_id=1)
         session.add(source); session.commit()
         scanned=asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))
         assert scanned==237
-        assert source.last_message_id==237
+        assert source.last_message_id==238
         assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))==0
 
 
@@ -143,24 +148,62 @@ def test_new_source_bootstrap_uses_one_month_cutoff(monkeypatch):
     engine=create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     now=datetime.now(timezone.utc)
-    messages=[type("TelegramMessage",(),{"id":i,"message":f"post {i}","date":now-timedelta(days=days)})() for i,days in [(1,29),(2,10)]]
+    cutoff=main.history_cutoff()
+    messages=[type("TelegramMessage",(),{"id":i,"message":f"post {i}","date":cutoff+timedelta(days=days)})() for i,days in [(11,1),(12,8)]]
     async def skip_analysis(*_args): return False
     monkeypatch.setattr(main,"process_text",skip_analysis)
     class FakeTelegram:
         async def get_entity(self,_chat_id): return object()
-        async def iter_messages(self,_entity,*,limit,min_id,reverse,offset_date=None):
-            assert reverse is True and min_id==0
-            assert now-timedelta(days=31)<offset_date<now-timedelta(days=29)
-            for message in messages:
-                if message.date>=offset_date:
-                    yield message
-        async def get_messages(self,_entity,limit):
-            return [type("TelegramMessage",(),{"id":50})()]
+        async def get_messages(self,_entity,limit=None,offset_date=None,ids=None):
+            if ids is not None:
+                return next(message for message in messages if message.id==ids)
+            if offset_date is None: return [messages[-1]]
+            assert limit==1 and offset_date==cutoff
+            return [type("TelegramMessage",(),{"id":10,"date":cutoff-timedelta(days=1)})()]
+        async def iter_messages(self,_entity,*,limit,min_id,reverse):
+            assert reverse is True and min_id>=10
+            for message in [item for item in messages if item.id>min_id][:limit]:
+                yield message
     with Session(engine) as session:
         source=main.Source(chat_id="123",title="jobs",last_message_id=0)
         session.add(source); session.commit()
-        assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))==2
-        assert source.last_message_id==2
+        assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100,max_messages=1))==1
+        assert source.last_message_id==11
+        assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100,max_messages=1))==1
+        assert source.last_message_id==12
+
+
+def test_source_with_only_old_posts_jumps_to_latest_checkpoint(monkeypatch):
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    latest=type("TelegramMessage",(),{"id":228,"message":"2021 post","date":datetime(2021,6,5,tzinfo=timezone.utc)})()
+    class FakeTelegram:
+        async def get_entity(self,_chat_id): return object()
+        async def get_messages(self,_entity,limit=None,offset_date=None,ids=None):
+            assert ids is None and offset_date is None
+            return [latest]
+        async def iter_messages(self,*_args,**_kwargs):
+            raise AssertionError("Old-only source should be skipped without reading history")
+    with Session(engine) as session:
+        source=main.Source(chat_id="123",title="old",last_message_id=0)
+        session.add(source); session.commit()
+        assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source))==0
+        assert source.last_message_id==228
+
+
+def test_history_cutoff_is_previous_calendar_month_start_in_india():
+    now=datetime(2026,11,21,12,tzinfo=timezone.utc)
+    assert main.history_cutoff(now)==datetime(2026,10,20,18,30,tzinfo=timezone.utc)
+
+
+def test_telegram_connection_does_not_hold_lock_for_long_sync(monkeypatch):
+    class FakeClient:
+        def is_connected(self): return True
+    monkeypatch.setattr(main,"telegram_client",FakeClient())
+    async def check_lock():
+        async with main.telegram_connection():
+            assert not main.TELEGRAM_LOCK.locked()
+    asyncio.run(check_lock())
 
 
 def test_prune_expired_opportunities_keeps_sources_and_recent_crossposts():
@@ -169,14 +212,14 @@ def test_prune_expired_opportunities_keeps_sources_and_recent_crossposts():
     now=datetime.now(timezone.utc)
     with Session(engine) as session:
         session.add(main.Source(chat_id="source",title="Source",enabled=True))
-        old=main.Job(title="Old opening",description="Old",source_chat_id="source",posted_at=now-timedelta(days=31))
+        old=main.Job(title="Old opening",description="Old",source_chat_id="source",posted_at=now-timedelta(days=32))
         recent=main.Job(title="Recent opening",description="Recent",source_chat_id="source",posted_at=now-timedelta(days=2))
         crossposted=main.Job(title="Recent crosspost",description="Recent",source_chat_id="source",posted_at=now-timedelta(days=40))
         session.add_all([old,recent,crossposted]); session.flush()
         session.add_all([
             main.JobSource(job_id=crossposted.id,chat_id="source",message_id=44,source_title="Source",original_message="Recent",posted_at=now-timedelta(days=1)),
-            main.JobSource(job_id=old.id,chat_id="source",message_id=45,source_title="Source",original_message="Old",posted_at=now-timedelta(days=31)),
-            main.Message(chat_id="source",message_id=45,text="Old",posted_at=now-timedelta(days=31)),
+            main.JobSource(job_id=old.id,chat_id="source",message_id=45,source_title="Source",original_message="Old",posted_at=now-timedelta(days=32)),
+            main.Message(chat_id="source",message_id=45,text="Old",posted_at=now-timedelta(days=32)),
         ])
         session.commit()
         assert main.prune_expired_opportunities(session,now=now)==1
@@ -198,10 +241,10 @@ def test_job_search_matches_skills_and_filters_latest_posts_first():
         ])
         session.commit()
         newest=main.list_jobs(search="python",sort="newest",period="",s=session)
-        assert [job["company"] for job in newest]==["Recent Labs","This Week","Older Co"]
+        assert [job["company"] for job in newest]==["Recent Labs","This Week"]
         assert [job["company"] for job in main.list_jobs(search="cloud",sort="newest",period="5d",s=session)]==["This Week"]
         assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="1d",s=session)]==["Recent Labs"]
-        assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="older",s=session)]==["Older Co"]
+        assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="1m",s=session)]==["Recent Labs","This Week"]
 
 
 def test_opportunities_are_scoped_to_enabled_sources_and_source_selection():
