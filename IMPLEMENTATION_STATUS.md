@@ -1,7 +1,7 @@
 # Implementation status
 
 ## Implemented for a single private user
-- Local FastAPI, SQLite, React/Vite dashboard, local CORS configuration, OpenAPI docs, Alembic migrations, and optional Docker Compose PostgreSQL/API/frontend setup.
+- Local FastAPI, SQLite, React/Vite dashboard, local CORS configuration, OpenAPI docs, Alembic migrations, and Docker Compose API/frontend setup that mounts the existing local data folders.
 - One local account with salted scrypt password hashes, signed expiring JWTs, and private API protection.
 - One persistent profile and versioned resume records in the configured database. Uploaded resume files live under the backend's persistent `storage/resumes/` directory. Profile and resume data survive restarts when the database and storage directories are preserved.
 - Telegram user sign-in with code and two-step password, already-authorized detection, transient auth restart retry, flood-wait feedback, source discovery/selection, incremental sync, background monitoring, and one shared serialized Telethon client. The Telethon session survives restarts when its configured session path is on persistent storage.
@@ -9,7 +9,7 @@
 - Rule-based job extraction plus schema-validated Agentia-Max extraction, extraction confidence, source references, cautious duplicate detection, matching/eligibility evaluation, and suspicious-post review signals.
 - Job search/filtering, recommendation ordering, categories, details, CSV export, application tracking, dashboard charts, optional private bot commands/alerts, thresholds, and daily digest.
 - Vercel-ready static dashboard configuration with a configurable API base URL and explicit CORS allowlist support for a separately hosted API.
-- Local Docker services use restart policies and persistent DB/session/resume folders. Docker Desktop must be set to start at Mac sign-in; new messages cannot be collected while the Mac is asleep or powered off.
+- Local Docker services reuse the existing profile database, session, and resume folder with restart policies. The local database currently has saved user/profile/resume/source/job data. Docker Desktop must be set to start at Mac sign-in; new messages cannot be collected while the Mac is asleep or powered off.
 
 ## Verification completed locally
 - 14 backend tests passed, including API auth/CORS, database-reopen profile persistence, multi-batch Telegram catch-up, profile-object matching, eligibility/deadlines, duplicate detection, resume parsing, deterministic extraction fallback, suspicious-post signals and ingestion persistence, and password/JWT behavior.

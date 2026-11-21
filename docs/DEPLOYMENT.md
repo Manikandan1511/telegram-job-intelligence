@@ -16,9 +16,9 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. Alembic upgrades the schema at API startup. Keep the backend process running for background Telegram polling. SQLite data is in `backend/data/`; private resumes and the Telethon session are under `storage/`. Back up those paths while the app is stopped. Restore by copying them back into this project folder. Keep `.env` private and excluded from Git.
 
-Docker Compose is available in the project root for an optional local PostgreSQL + API + dashboard run. Public network deployment still needs security review. Hosting a user-account Telethon session on a public or ephemeral server is not recommended.
+Docker Compose is available in the project root for a local SQLite + API + dashboard run. It mounts the existing `backend/data/` and `storage/` folders so a user's profile, resume, Telegram session, and source checkpoints are preserved. Public network deployment still needs security review. Hosting a user-account Telethon session on a public or ephemeral server is not recommended.
 
-For automatic restart after a Mac sign-in, enable Docker Desktop's **Start Docker Desktop when you sign in**, then run `docker compose up -d --build` once. The containers use `restart: unless-stopped` and save PostgreSQL data in its named volume plus the Telethon session/resume files in `storage/`. The dashboard is at `http://127.0.0.1:8080`; when it opens or returns to the foreground, it asks the worker to catch up immediately. Job data refreshes in the open dashboard every 30 seconds. The Mac still must be awake and online for new messages to be collected.
+For automatic restart after a Mac sign-in, enable Docker Desktop's **Start Docker Desktop when you sign in**, then run `docker compose up -d --build` once. The containers use `restart: unless-stopped` and mount the existing SQLite database plus the Telegram session/resume files in `storage/`. The dashboard is at `http://127.0.0.1:8080`; when it opens or returns to the foreground, it asks the worker to catch up immediately. Job data refreshes in the open dashboard every 30 seconds. The Mac still must be awake and online for new messages to be collected.
 
 ## Vercel dashboard with persistent Telegram service
 

@@ -1,18 +1,4 @@
 services:
-  database:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: job_intelligence
-      POSTGRES_USER: job_intelligence
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_only_change_me}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U job_intelligence -d job_intelligence"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
   backend:
     restart: unless-stopped
     build:
@@ -21,16 +7,14 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+psycopg://job_intelligence:${POSTGRES_PASSWORD:-local_dev_only_change_me}@database:5432/job_intelligence
+      # Reuse the user's existing SQLite database, Telegram session, and resume files.
+      DATABASE_URL: sqlite:///./backend/data/job_intelligence.db
       TELEGRAM_SESSION: /app/storage/telegram
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./storage:/app/storage
       - ./backend/data:/app/backend/data
-    depends_on:
-      database:
-        condition: service_healthy
   frontend:
     restart: unless-stopped
     build:
@@ -40,5 +24,3 @@ services:
       - "127.0.0.1:8080:80"
     depends_on:
       - backend
-volumes:
-  postgres_data:

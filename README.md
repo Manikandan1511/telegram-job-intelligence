@@ -34,13 +34,13 @@ On first open, create the single local account with an email and a password of a
 
 ## Optional Docker Compose deployment
 
-Docker Compose starts PostgreSQL, the API, and a production-built dashboard. It binds only to loopback and costs nothing to run locally:
+Docker Compose starts the API and production-built dashboard, reusing your existing SQLite database, Telegram session, and resume files. It binds only to loopback and costs nothing to run locally:
 
 ```sh
 docker compose up --build
 ```
 
-Open http://127.0.0.1:8080. Set a private `POSTGRES_PASSWORD` in the local ignored `.env` before using this beyond a throwaway local run. PostgreSQL data uses a named volume; Telegram and resume files remain in this project folder.
+Open http://127.0.0.1:8080. Your saved database remains in `backend/data/`; the Telegram session and private resumes remain under `storage/`.
 
 For restart recovery, configure Docker Desktop to start when you sign in and launch the stack once with `docker compose up -d --build`. The saved Telegram session reconnects automatically. After sleep or shutdown, the monitor catches up from its last saved message IDs; the dashboard asks for an immediate catch-up when it opens/returns to the foreground and refreshes displayed jobs every 30 seconds. Collection pauses while the Mac is asleep or powered off.
 

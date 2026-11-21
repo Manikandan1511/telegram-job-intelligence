@@ -3,7 +3,7 @@
 This project began with `Project_report.md` and no application source files. The project is built as a local-first single-user app to keep hosting and database costs at zero.
 
 ## Implemented
-- [x] FastAPI backend, SQLite persistence, React dashboard, CORS, API docs, and Docker Compose/PostgreSQL option.
+- [x] FastAPI backend, persistent SQLite for the personal Mac setup, optional PostgreSQL URL configuration, React dashboard, CORS, API docs, and Docker Compose local restart setup.
 - [x] Single-user registration/login with scrypt password hashes, signed expiring JWTs, and loopback-only binding.
 - [x] Telegram login, two-step flow, account reuse, code-send retry/rate-limit handling, source selection, disconnect, incremental sync, background polling, and serialized shared client.
 - [x] Resume PDF/DOCX/TXT parsing, private file persistence, editable candidate profile, and version history.
