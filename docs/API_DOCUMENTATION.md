@@ -16,7 +16,8 @@ The local API root is `http://127.0.0.1:8000`; interactive OpenAPI documentation
 | POST | `/api/telegram/start` | Request a login code |
 | POST | `/api/telegram/verify` | Verify the login code |
 | POST | `/api/telegram/password` | Complete two-step verification |
-| GET | `/api/telegram/sources` | List available groups and channels |
+| GET | `/api/telegram/sources` | Load groups and channels visible to the authorized Telegram account (up to 500) |
+| GET | `/api/telegram/sources/selected` | List enabled sources for the dashboard |
 | PUT | `/api/telegram/sources/{chat_id}` | Enable or disable a source |
 | POST | `/api/telegram/sync` | Run a bounded manual sync |
 | GET | `/api/jobs/recommended` | List stronger matches |
@@ -34,4 +35,4 @@ The local API root is `http://127.0.0.1:8000`; interactive OpenAPI documentation
 
 Private endpoints require `Authorization: Bearer <token>`. The first account is the only account in this edition. All endpoints are intended for loopback use. Do not expose this server to a public network.
 
-`GET /api/jobs` supports `search` (title, company, description, location, source, and detected/matched skills), `category` (`excellent`, `strong`, `moderate`, `internship`), `period` (`1d`, `5d`, `1w`, `15d`, `1m`, `older`), and `sort` (`newest`, `oldest`, `match`). The default order is newest Telegram post first. `older` means more than 30 days old; the duration filters include posts from the selected period through now.
+`GET /api/jobs` returns jobs linked to enabled Telegram sources by default. Pass `source=<chat_id>` to show only postings linked to one enabled source; disabled or unknown sources return no jobs. Cross-posts are included when any linked source is enabled. It supports `search` (title, company, description, location, source, and detected/matched skills), `category` (`excellent`, `strong`, `moderate`, `internship`), `period` (`1d`, `5d`, `1w`, `15d`, `1m`, `older`), and `sort` (`newest`, `oldest`, `match`). The default order is newest Telegram post first. `older` means more than 30 days old; the duration filters include posts from the selected period through now.

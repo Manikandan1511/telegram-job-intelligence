@@ -25,3 +25,8 @@ For automatic recovery after a Mac reboot, open Docker Desktop **Settings → Ge
 ## Local URLs
 
 The backend API is at `http://127.0.0.1:8000`; the dashboard is at `http://127.0.0.1:5173`. The backend root returns API links. CORS allows Vite on `localhost` and `127.0.0.1`.
+
+
+## Telegram source list is empty or will not load
+
+Open **Telegram Sources** while the account is connected and choose **Reload sources**. The list comes from groups and channels visible in the signed-in Telegram account (up to 500 dialogs); it does not read arbitrary Telegram sources by username. If loading fails, the page shows the API error and a Retry action. Newly found chats start unchecked. Enable the specific chats you want; Opportunities includes jobs linked to enabled chats and can be narrowed to one enabled source.

@@ -46,7 +46,7 @@ class Source(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[str] = mapped_column(String(100), unique=True)
     title: Mapped[str] = mapped_column(String(300))
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     last_message_id: Mapped[int] = mapped_column(Integer, default=0)
 
 class Message(Base):

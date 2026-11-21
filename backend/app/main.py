@@ -499,9 +499,13 @@ async def telegram_sources(s:Session=Depends(db)):
         for d in dialogs:
             if not (d.is_group or d.is_channel): continue
             cid=str(d.id); src=saved.get(cid)
-            if not src: src=Source(chat_id=cid,title=d.name or cid); s.add(src); s.flush()
+            if not src: src=Source(chat_id=cid,title=d.name or cid,enabled=False); s.add(src); s.flush()
             out.append({"chat_id":cid,"title":d.name,"enabled":src.enabled,"type":"channel" if d.is_channel else "group"})
         s.commit(); return out
+@app.get("/api/telegram/sources/selected")
+def selected_telegram_sources(s:Session=Depends(db)):
+    sources=s.scalars(select(Source).where(Source.enabled==True).order_by(Source.title)).all()
+    return [{"chat_id":source.chat_id,"title":source.title,"enabled":source.enabled} for source in sources]
 @app.put("/api/telegram/sources/{chat_id}")
 def toggle_source(chat_id:str,data:dict,s:Session=Depends(db)):
     src=s.scalar(select(Source).where(Source.chat_id==chat_id))
@@ -547,8 +551,19 @@ async def sync(s:Session=Depends(db),limit:int=Query(100,ge=1,le=500)):
     wake_monitor()
     return {"ok":True,"new_jobs":added,"message":"Sync completed. New postings will continue to appear automatically."}
 @app.get("/api/jobs")
-def list_jobs(search:str="",category:str="",sort:str="newest",period:str="",s:Session=Depends(db)):
+def list_jobs(search:str="",category:str="",sort:str="newest",period:str="",source:str="",s:Session=Depends(db)):
     q=select(Job)
+    enabled_sources=select(Source.chat_id).where(Source.enabled==True)
+    if source:
+        selected_source=s.scalar(select(Source).where(Source.chat_id==source))
+        if not selected_source or not selected_source.enabled:
+            q=q.where(Job.id==-1)
+        else:
+            source_jobs=select(JobSource.job_id).where(JobSource.chat_id==source)
+            q=q.where((Job.source_chat_id==source)|(Job.id.in_(source_jobs)))
+    else:
+        enabled_source_jobs=select(JobSource.job_id).where(JobSource.chat_id.in_(enabled_sources))
+        q=q.where(Job.source_chat_id.in_(enabled_sources)|Job.id.in_(enabled_source_jobs))
     if search:
         term=f"%{search.strip()}%"
         q=q.where((Job.title.ilike(term))|(Job.company.ilike(term))|(Job.description.ilike(term))|(Job.location.ilike(term))|(Job.source_title.ilike(term))|(Job.required_skills.ilike(term))|(Job.matched_skills.ilike(term)))
@@ -578,11 +593,23 @@ def job_categories(s:Session=Depends(db)):
     jobs=s.scalars(select(Job)).all()
     return {"excellent":sum(j.score>=85 for j in jobs),"strong":sum(70<=j.score<85 for j in jobs),"moderate":sum(55<=j.score<70 for j in jobs),"low":sum(40<=j.score<55 for j in jobs),"poor":sum(j.score<40 for j in jobs),"internship":sum("intern" in (j.employment_type or "").lower() for j in jobs),"full_time":sum("full" in (j.employment_type or "").lower() for j in jobs)}
 @app.get("/api/jobs/export")
-def export_jobs(s:Session=Depends(db)):
+def export_jobs(source:str="",s:Session=Depends(db)):
     output=io.StringIO(newline="")
     writer=csv.writer(output)
     writer.writerow(["Title","Company","Location","Employment Type","Match Score","Eligibility","Application Status","Application URL","Source","Posted At","Description"])
-    for j in s.scalars(select(Job).order_by(Job.posted_at.desc())).all():
+    q=select(Job)
+    enabled_sources=select(Source.chat_id).where(Source.enabled==True)
+    if source:
+        selected_source=s.scalar(select(Source).where(Source.chat_id==source))
+        if not selected_source or not selected_source.enabled:
+            q=q.where(Job.id==-1)
+        else:
+            source_jobs=select(JobSource.job_id).where(JobSource.chat_id==source)
+            q=q.where((Job.source_chat_id==source)|(Job.id.in_(source_jobs)))
+    else:
+        enabled_source_jobs=select(JobSource.job_id).where(JobSource.chat_id.in_(enabled_sources))
+        q=q.where(Job.source_chat_id.in_(enabled_sources)|Job.id.in_(enabled_source_jobs))
+    for j in s.scalars(q.order_by(Job.posted_at.desc(),Job.id.desc())).all():
         row=[j.title,j.company,j.location,j.employment_type,j.score,j.eligibility,j.application_status,j.application_url,j.source_title,j.posted_at.isoformat(),j.description]
         writer.writerow([("'"+str(value)) if isinstance(value,str) and value.startswith(("=","+","-","@")) else value for value in row])
     return Response(content=output.getvalue(),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=job-opportunities.csv"})

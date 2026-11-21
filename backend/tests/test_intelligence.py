@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -143,10 +144,11 @@ def test_job_search_matches_skills_and_filters_latest_posts_first():
     Base.metadata.create_all(engine)
     now=datetime.now(timezone.utc)
     with Session(engine) as session:
+        session.add(main.Source(chat_id="selected-chat",title="Selected Jobs",enabled=True))
         session.add_all([
-            main.Job(title="Python Engineer",company="Recent Labs",description="Backend role",required_skills='["python"]',posted_at=now-timedelta(hours=2)),
-            main.Job(title="Engineer",company="This Week",description="Cloud role",required_skills='["python", "cloud"]',posted_at=now-timedelta(days=3)),
-            main.Job(title="Engineer",company="Older Co",description="Old opening",required_skills='["python"]',posted_at=now-timedelta(days=40)),
+            main.Job(title="Python Engineer",company="Recent Labs",description="Backend role",required_skills='["python"]',source_chat_id="selected-chat",posted_at=now-timedelta(hours=2)),
+            main.Job(title="Engineer",company="This Week",description="Cloud role",required_skills='["python", "cloud"]',source_chat_id="selected-chat",posted_at=now-timedelta(days=3)),
+            main.Job(title="Engineer",company="Older Co",description="Old opening",required_skills='["python"]',source_chat_id="selected-chat",posted_at=now-timedelta(days=40)),
         ])
         session.commit()
         newest=main.list_jobs(search="python",sort="newest",period="",s=session)
@@ -154,6 +156,57 @@ def test_job_search_matches_skills_and_filters_latest_posts_first():
         assert [job["company"] for job in main.list_jobs(search="cloud",sort="newest",period="5d",s=session)]==["This Week"]
         assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="1d",s=session)]==["Recent Labs"]
         assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="older",s=session)]==["Older Co"]
+
+
+def test_opportunities_are_scoped_to_enabled_sources_and_source_selection():
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now=datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all([
+            main.Source(chat_id="enabled-chat",title="Enabled channel",enabled=True),
+            main.Source(chat_id="disabled-chat",title="Disabled channel",enabled=False),
+        ])
+        session.flush()
+        enabled_job=main.Job(title="Enabled opening",company="One",description="Role",source_chat_id="enabled-chat",source_message_id=10,posted_at=now)
+        disabled_job=main.Job(title="Disabled opening",company="Two",description="Role",source_chat_id="disabled-chat",source_message_id=20,posted_at=now)
+        cross_post=main.Job(title="Cross posted opening",company="Three",description="Role",source_chat_id="disabled-chat",source_message_id=21,posted_at=now)
+        session.add_all([enabled_job,disabled_job,cross_post]); session.flush()
+        session.add(main.JobSource(job_id=cross_post.id,chat_id="enabled-chat",message_id=11,source_title="Enabled channel",original_message="Role",posted_at=now))
+        session.commit()
+        all_selected=main.list_jobs(sort="newest",s=session)
+        assert {job["title"] for job in all_selected}=={"Enabled opening","Cross posted opening"}
+        one_source=main.list_jobs(sort="newest",source="enabled-chat",s=session)
+        assert {job["title"] for job in one_source}=={"Enabled opening","Cross posted opening"}
+        assert main.list_jobs(sort="newest",source="disabled-chat",s=session)==[]
+        assert [source["chat_id"] for source in main.selected_telegram_sources(session)]==["enabled-chat"]
+        exported=main.export_jobs(s=session).body.decode()
+        assert "Enabled opening" in exported and "Cross posted opening" in exported
+        assert "Disabled opening" not in exported
+
+
+def test_telegram_sources_load_from_authorized_dialogs_and_start_unselected(monkeypatch):
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    class Dialog:
+        id=12345
+        name="Backend Jobs"
+        is_group=True
+        is_channel=False
+    class FakeTelegram:
+        async def is_user_authorized(self):
+            return True
+        async def get_dialogs(self,limit):
+            assert limit==500
+            return [Dialog()]
+    @asynccontextmanager
+    async def fake_connection():
+        yield FakeTelegram()
+    monkeypatch.setattr(main,"telegram_connection",fake_connection)
+    with Session(engine) as session:
+        sources=asyncio.run(main.telegram_sources(session))
+        assert sources==[{"chat_id":"12345","title":"Backend Jobs","enabled":False,"type":"group"}]
+        assert main.selected_telegram_sources(session)==[]
 
 
 def test_password_hash_and_signed_token_round_trip():
