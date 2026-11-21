@@ -6,7 +6,7 @@ import logging
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json, re
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query, Response, Request
@@ -547,14 +547,25 @@ async def sync(s:Session=Depends(db),limit:int=Query(100,ge=1,le=500)):
     wake_monitor()
     return {"ok":True,"new_jobs":added,"message":"Sync completed. New postings will continue to appear automatically."}
 @app.get("/api/jobs")
-def list_jobs(search:str="",category:str="",sort:str="newest",s:Session=Depends(db)):
+def list_jobs(search:str="",category:str="",sort:str="newest",period:str="",s:Session=Depends(db)):
     q=select(Job)
-    if search: q=q.where((Job.title.ilike(f"%{search}%"))|(Job.company.ilike(f"%{search}%"))|(Job.description.ilike(f"%{search}%")))
+    if search:
+        term=f"%{search.strip()}%"
+        q=q.where((Job.title.ilike(term))|(Job.company.ilike(term))|(Job.description.ilike(term))|(Job.location.ilike(term))|(Job.source_title.ilike(term))|(Job.required_skills.ilike(term))|(Job.matched_skills.ilike(term)))
     if category=="excellent": q=q.where(Job.score>=85)
     elif category=="strong": q=q.where(Job.score.between(70,84))
     elif category=="moderate": q=q.where(Job.score.between(55,69))
     elif category=="internship": q=q.where(Job.employment_type.ilike("%intern%"))
-    q=q.order_by(Job.score.desc() if sort=="match" else Job.posted_at.desc())
+    day_ranges={"1d":1,"5d":5,"1w":7,"15d":15,"1m":30}
+    if period in day_ranges:
+        q=q.where(Job.posted_at>=datetime.now(timezone.utc)-timedelta(days=day_ranges[period]))
+    elif period=="older":
+        q=q.where(Job.posted_at<datetime.now(timezone.utc)-timedelta(days=30))
+    elif period not in ("","all"):
+        raise HTTPException(422,"Choose a supported posting-age filter")
+    if sort=="match": q=q.order_by(Job.score.desc(),Job.posted_at.desc(),Job.id.desc())
+    elif sort=="oldest": q=q.order_by(Job.posted_at.asc(),Job.id.asc())
+    else: q=q.order_by(Job.posted_at.desc(),Job.id.desc())
     return [job_out(j) for j in s.scalars(q.limit(500)).all()]
 @app.get("/api/jobs/recommended")
 def recommended_jobs(s:Session=Depends(db)):

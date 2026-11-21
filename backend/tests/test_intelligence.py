@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -136,6 +136,24 @@ def test_telegram_catchup_drains_multiple_batches_from_checkpoint(monkeypatch):
         assert scanned==237
         assert source.last_message_id==237
         assert asyncio.run(main.sync_source_history(FakeTelegram(),session,source,batch_size=100))==0
+
+
+def test_job_search_matches_skills_and_filters_latest_posts_first():
+    engine=create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now=datetime.now(timezone.utc)
+    with Session(engine) as session:
+        session.add_all([
+            main.Job(title="Python Engineer",company="Recent Labs",description="Backend role",required_skills='["python"]',posted_at=now-timedelta(hours=2)),
+            main.Job(title="Engineer",company="This Week",description="Cloud role",required_skills='["python", "cloud"]',posted_at=now-timedelta(days=3)),
+            main.Job(title="Engineer",company="Older Co",description="Old opening",required_skills='["python"]',posted_at=now-timedelta(days=40)),
+        ])
+        session.commit()
+        newest=main.list_jobs(search="python",sort="newest",period="",s=session)
+        assert [job["company"] for job in newest]==["Recent Labs","This Week","Older Co"]
+        assert [job["company"] for job in main.list_jobs(search="cloud",sort="newest",period="5d",s=session)]==["This Week"]
+        assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="1d",s=session)]==["Recent Labs"]
+        assert [job["company"] for job in main.list_jobs(search="python",sort="newest",period="older",s=session)]==["Older Co"]
 
 
 def test_password_hash_and_signed_token_round_trip():

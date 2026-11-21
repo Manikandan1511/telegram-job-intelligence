@@ -8,11 +8,12 @@
 - Catch-up scans drain each enabled source from its saved message checkpoint in pages, use exponential retry after network errors, can be woken when the dashboard opens/returns to foreground, and report connection/catch-up state. The dashboard refreshes its data every 30 seconds.
 - Rule-based job extraction plus schema-validated Agentia-Max extraction, extraction confidence, source references, cautious duplicate detection, matching/eligibility evaluation, and suspicious-post review signals.
 - Job search/filtering, recommendation ordering, categories, details, CSV export, application tracking, dashboard charts, optional private bot commands/alerts, thresholds, and daily digest.
+- Opportunities search works across role, company, description, location, source, and skills; results default to newest Telegram post and support 1-day, 5-day, 1-week, 15-day, 1-month, and older-than-one-month filters.
 - Vercel-ready static dashboard configuration with a configurable API base URL and explicit CORS allowlist support for a separately hosted API.
 - Local Docker services reuse the existing profile database, session, and resume folder with restart policies. The local database currently has saved user/profile/resume/source/job data. Docker Desktop must be set to start at Mac sign-in; new messages cannot be collected while the Mac is asleep or powered off.
 
 ## Verification completed locally
-- 14 backend tests passed, including API auth/CORS, database-reopen profile persistence, multi-batch Telegram catch-up, profile-object matching, eligibility/deadlines, duplicate detection, resume parsing, deterministic extraction fallback, suspicious-post signals and ingestion persistence, and password/JWT behavior.
+- 15 backend tests passed, including API auth/CORS, search/skill/date filtering and newest ordering, database-reopen profile persistence, multi-batch Telegram catch-up, profile-object matching, eligibility/deadlines, duplicate detection, resume parsing, deterministic extraction fallback, suspicious-post signals and ingestion persistence, and password/JWT behavior.
 - Alembic database migrated successfully through `0004_job_review`.
 - Frontend TypeScript check and production build passed.
 

@@ -33,3 +33,5 @@ The local API root is `http://127.0.0.1:8000`; interactive OpenAPI documentation
 | GET | `/api/dashboard` | Dashboard totals |
 
 Private endpoints require `Authorization: Bearer <token>`. The first account is the only account in this edition. All endpoints are intended for loopback use. Do not expose this server to a public network.
+
+`GET /api/jobs` supports `search` (title, company, description, location, source, and detected/matched skills), `category` (`excellent`, `strong`, `moderate`, `internship`), `period` (`1d`, `5d`, `1w`, `15d`, `1m`, `older`), and `sort` (`newest`, `oldest`, `match`). The default order is newest Telegram post first. `older` means more than 30 days old; the duration filters include posts from the selected period through now.
